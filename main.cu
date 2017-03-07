@@ -214,13 +214,13 @@ cublasSgeam(cublasHandle,
 
     cublasSasum(cublasHandle, 1, (float*)d_dist_buf_1, 1, &result);
     checkCudaError(cudaGetLastError());
-    std::cout << result << '\n' ;
+    std::cout <<'\nFirst element by MatrixMul: '<< result << '\n' ;
     cublasSasum(cublasHandle, 1, (float*)d_dist_buf_2, 1, &result);
     checkCudaError(cudaGetLastError());
-    std::cout << result << '\n' ;
+    std::cout <<'First element by cublas: ' << result << '\n' ;
     cublasSasum(cublasHandle, voc * batch, (float*)d_dist_buf, 1, &result);
     checkCudaError(cudaGetLastError());
-    std::cout << result << '\n' ;
+    std::cout <<"Difference: "<< result << '\n' ;
 
 
   }

@@ -97,6 +97,23 @@ matrixMulCUDA(float *C, float *C_input, float *A, float *B,
 }
 
 
+// C = A - B if A[i] == -1000, C[i] == 0;
+// <<<1, 1024>>>
+__global__ 
+void special_matrix_sum(float *C, float *A, float *B, int count) {
+  for (int i = threadIdx.x; i< count; i += blockDim.x) {
+    if (A[i] == -1000){
+      C[i] = 0;
+    } else {
+      C[i] = A[i] - B[i];
+    }
+  }
+}
+  
+
+
+
+
 template<typename dType>
 void print_matrix_gpu(dType *d_matrix,int rows,int cols, int row_start, int row_end, int col_start, int col_end) {
     dType * h_matrix = (dType *)malloc(rows*cols*sizeof(dType));
@@ -248,13 +265,8 @@ CHECK(dist_input_meta[1] == batch);// << dist_input_meta[1];
     checkCublasError(cublasCreate(&cublasHandle));
 float alpha = 1.f, beta = -1.f, result = 1.0f;
 
-cublasSgeam(cublasHandle,
-	    CUBLAS_OP_N, CUBLAS_OP_N,
-	      voc, batch,
-	      &alpha, (float*)d_dist_buf_1, voc,
-	      &beta, (float*)d_dist_buf_output,voc, 
-	      (float*)d_dist_buf_res,voc);
-    checkCudaError(cudaGetLastError());
+
+ special_matrix_sum<<<1,1024>>>((float*)d_dist_buf_res,(float*) d_dist_buf_1,(float*) d_dist_buf_2,voc*batch);
 
     cublasSasum(cublasHandle, 1, (float*)d_dist_buf_1, 1, &result);
     checkCudaError(cudaGetLastError());
@@ -270,7 +282,7 @@ cublasSgeam(cublasHandle,
 
     cublasSasum(cublasHandle, voc * batch, (float*)d_dist_buf_res, 1, &result);
     checkCudaError(cudaGetLastError());
-    std::cout <<"MatrixMul - d_dist_buf_output: "<< result << '\n' ;
+    std::cout <<"MatrixMul - cublas (sparse): "<< result << '\n' ;
 
     std::cout << "d_dist_buf_input\n";
     print_matrix_gpu((float*)d_dist_buf_input, voc, batch, 0, 10, 0, batch);
@@ -281,8 +293,8 @@ cublasSgeam(cublasHandle,
     std::cout << "d_dist_buf_2\n";
     print_matrix_gpu((float*)d_dist_buf_2, voc, batch, 0, 10, 0, batch);
 
-    std::cout << "d_dist_buf_output\n";
-    print_matrix_gpu((float*)d_dist_buf_output, voc, batch, 0, 10, 0, batch);
+    //    std::cout << "d_dist_buf_output\n";
+    //print_matrix_gpu((float*)d_dist_buf_output, voc, batch, 0, 10, 0, batch);
 
 
   }

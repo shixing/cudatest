@@ -29,7 +29,7 @@ const int block_size = 32;
  */
 template <int BLOCK_SIZE>
 __global__ void
-matrixMulCUDA(float *C, float *A, float *B,
+matrixMulCUDA(float *C, float *C_input, float *A, float *B,
     const int M, const int N, const int K) {
   int cx = threadIdx.x + blockIdx.x*blockDim.x;
   int cy = threadIdx.y + blockIdx.y*blockDim.y;
@@ -38,63 +38,85 @@ matrixMulCUDA(float *C, float *A, float *B,
   float Csub = 0.f;
   // Loop over all the sub-matrices of A and B
   // required to compute the block sub-matrix
-    for (int ak = threadIdx.y, bk = threadIdx.x; ;
-        ak += BLOCK_SIZE, bk += BLOCK_SIZE) {
-      __shared__ float As[BLOCK_SIZE][BLOCK_SIZE];
-      __shared__ float Bs[BLOCK_SIZE][BLOCK_SIZE];
+  __shared__ float As[BLOCK_SIZE][BLOCK_SIZE];
+  __shared__ float Bs[BLOCK_SIZE][BLOCK_SIZE];
 
-      /*// Load the matrices from device memory*/
-      /*// to shared memory; each thread loads*/
-      /*// one element of each matrix*/
-      if (ak < K && cx < M) {
-	As[threadIdx.y][threadIdx.x] = A[cx*K+ak]; //As = A
-      } else {
-	As[threadIdx.y][threadIdx.x] = 0; 
-      }
-      if (bk < K && cy < N){
-        Bs[threadIdx.y][threadIdx.x] = B[cy*K+bk]; //Bs = B^T
-      } else {
-        Bs[threadIdx.y][threadIdx.x] = 0; 
-      }
-
-      // Synchronize to make sure the matrices are loaded
-      __syncthreads();
-
-      // Multiply the two matrices together;
-      // each thread computes one element
-      // of the block sub-matrix
-
-      #pragma unroll
-      for (int k = 0; k < BLOCK_SIZE; ++k) {
-        Csub += As[k][threadIdx.x] * Bs[threadIdx.y][k];
-      }
-
-      /*// Synchronize to make sure that the preceding*/
-      /*// computation is done before loading two new*/
-      /*// sub-matrices of A and B in the next iteration*/
-      __syncthreads();
-
-      if (ak / BLOCK_SIZE == K/BLOCK_SIZE){
-	break;
-      }
-
+  for (int ak = threadIdx.y, bk = threadIdx.x; ;
+       ak += BLOCK_SIZE, bk += BLOCK_SIZE) {
+    
+    /*// Load the matrices from device memory*/
+    /*// to shared memory; each thread loads*/
+    /*// one element of each matrix*/
+    if (ak < K && cx < M) {
+      As[threadIdx.y][threadIdx.x] = A[cx*K+ak]; //As = A
+    } else {
+      As[threadIdx.y][threadIdx.x] = 0; 
     }
-
-    // Write the block sub-matrix to device memory;
-    // each thread writes one element
-
+    if (bk < K && cy < N){
+      Bs[threadIdx.y][threadIdx.x] = B[cy*K+bk]; //Bs = B^T
+    } else {
+      Bs[threadIdx.y][threadIdx.x] = 0; 
+    }
+    
+    // Synchronize to make sure the matrices are loaded
+    __syncthreads();
+    
+    // Multiply the two matrices together;
+    // each thread computes one element
+    // of the block sub-matrix
+    
+    if (cx < M && cy < N) {
+#pragma unroll
+      for (int k = 0; k < BLOCK_SIZE; ++k) {
+	Csub += As[k][threadIdx.x] * Bs[threadIdx.y][k];
+      } 
+    }
+    
+    /*// Synchronize to make sure that the preceding*/
+    /*// computation is done before loading two new*/
+    /*// sub-matrices of A and B in the next iteration*/
+    __syncthreads();
+    
+    if (ak / BLOCK_SIZE == K/BLOCK_SIZE){
+      break;
+    }
+    
+  }
+  
+  // Write the block sub-matrix to device memory;
+  // each thread writes one element
+  
   if (cx < M && cy < N) {
-    C[cy*M+cx] = Csub;
+    if (C_input[cy*M+cx] > 0){
+      C[cy*M+cx] = Csub;
+    } else {
+      C[cy*M+cx] = -1000;
+    }
+    
   }
 }
 
+
+template<typename dType>
+void print_matrix_gpu(dType *d_matrix,int rows,int cols, int row_start, int row_end, int col_start, int col_end) {
+    dType * h_matrix = (dType *)malloc(rows*cols*sizeof(dType));
+    cudaMemcpy(h_matrix, d_matrix, rows*cols*sizeof(dType), cudaMemcpyDeviceToHost);
+    for(int i=row_start; i<row_end; i++) {
+        for(int j=col_start; j<col_end; j++) {
+	  std::cout << h_matrix[i + j*rows] << " ";
+        }
+	std::cout << "\n";
+    }
+    std::cout << "\n";
+    free(h_matrix);
+}
 
 
 
 int main() {
   FILE *fp = NULL;
   void *db_buf, *pad_buf, *dist_buf;
-void *d_db_buf, *d_pad_buf, *d_dist_buf, *d_dist_buf_1, *d_dist_buf_2;
+  void *d_db_buf, *d_pad_buf, *d_dist_buf_input,*d_dist_buf_res,*d_dist_buf_output, *d_dist_buf_1, *d_dist_buf_2;
   {
 CHECK(fp = fopen(db_input, "rb"));
     int db_input_meta[2];
@@ -132,12 +154,34 @@ CHECK(dist_input_meta[1] == batch);// << dist_input_meta[1];
     int count = voc*batch;
     dist_buf = malloc(count*sizeof(float));
     CHECK(fread(dist_buf, sizeof(float), count, fp) == count);
-    checkCudaError(cudaMalloc(&d_dist_buf, count*sizeof(float)));
+    checkCudaError(cudaMalloc(&d_dist_buf_input, count*sizeof(float)));
     checkCudaError(cudaMalloc(&d_dist_buf_1, count*sizeof(float)));
     checkCudaError(cudaMalloc(&d_dist_buf_2, count*sizeof(float)));
-    checkCudaError(cudaMemcpy(d_dist_buf, dist_buf, count*sizeof(float),
+    checkCudaError(cudaMalloc(&d_dist_buf_res, count*sizeof(float)));
+    checkCudaError(cudaMemcpy(d_dist_buf_input, dist_buf, count*sizeof(float),
+                              cudaMemcpyHostToDevice));
+    checkCudaError(cudaMemcpy(d_dist_buf_1, dist_buf, count*sizeof(float),
+                              cudaMemcpyHostToDevice));
+    checkCudaError(cudaMemcpy(d_dist_buf_2, dist_buf, count*sizeof(float),
+                              cudaMemcpyHostToDevice));
+
+  }
+
+  {
+CHECK(fp = fopen(dist_output, "rb"));
+    int dist_input_meta[2];
+    CHECK(fread(dist_input_meta, sizeof(int), 2, fp) == 2);
+CHECK(dist_input_meta[0] == voc);// << dist_input_meta[0];
+CHECK(dist_input_meta[1] == batch);// << dist_input_meta[1];
+    int count = voc*batch;
+    dist_buf = malloc(count*sizeof(float));
+    CHECK(fread(dist_buf, sizeof(float), count, fp) == count);
+    checkCudaError(cudaMalloc(&d_dist_buf_output, count*sizeof(float)));
+    checkCudaError(cudaMemcpy(d_dist_buf_output, dist_buf, count*sizeof(float),
                               cudaMemcpyHostToDevice));
   }
+
+
   
   {
     cudaEvent_t start, stop;
@@ -150,7 +194,7 @@ CHECK(dist_input_meta[1] == batch);// << dist_input_meta[1];
     checkCudaError(cudaEventRecord(start, NULL));
     for (int i = 0; i < Test; i++) {
       matrixMulCUDA<block_size><<<grid, threads>>>(
-          (float*)d_dist_buf_1, (float*)d_db_buf, (float*)d_pad_buf,
+          (float*)d_dist_buf_1, (float*)d_dist_buf_input, (float*)d_db_buf, (float*)d_pad_buf,
           voc, batch, embed);
     }
     checkCudaError(cudaEventRecord(stop, NULL));
@@ -208,19 +252,37 @@ cublasSgeam(cublasHandle,
 	    CUBLAS_OP_N, CUBLAS_OP_N,
 	      voc, batch,
 	      &alpha, (float*)d_dist_buf_1, voc,
-	      &beta, (float*)d_dist_buf_2,voc, 
-	      (float*)d_dist_buf,voc);
+	      &beta, (float*)d_dist_buf_output,voc, 
+	      (float*)d_dist_buf_res,voc);
     checkCudaError(cudaGetLastError());
 
     cublasSasum(cublasHandle, 1, (float*)d_dist_buf_1, 1, &result);
     checkCudaError(cudaGetLastError());
-    std::cout <<'\nFirst element by MatrixMul: '<< result << '\n' ;
+    std::cout <<"\nFirst element by MatrixMul: "<< result << '\n' ;
+
     cublasSasum(cublasHandle, 1, (float*)d_dist_buf_2, 1, &result);
     checkCudaError(cudaGetLastError());
-    std::cout <<'First element by cublas: ' << result << '\n' ;
-    cublasSasum(cublasHandle, voc * batch, (float*)d_dist_buf, 1, &result);
+    std::cout <<"First element by cublas: " << result << '\n' ;
+
+    cublasSasum(cublasHandle, 1, (float*)d_dist_buf_output, 1, &result);
     checkCudaError(cudaGetLastError());
-    std::cout <<"Difference: "<< result << '\n' ;
+    std::cout <<"\nFirst element by d_dist_buf_output: "<< result << '\n' ;
+
+    cublasSasum(cublasHandle, voc * batch, (float*)d_dist_buf_res, 1, &result);
+    checkCudaError(cudaGetLastError());
+    std::cout <<"MatrixMul - d_dist_buf_output: "<< result << '\n' ;
+
+    std::cout << "d_dist_buf_input\n";
+    print_matrix_gpu((float*)d_dist_buf_input, voc, batch, 0, 10, 0, batch);
+
+    std::cout << "d_dist_buf_1\n";
+    print_matrix_gpu((float*)d_dist_buf_1, voc, batch, 0, 10, 0, batch);
+
+    std::cout << "d_dist_buf_2\n";
+    print_matrix_gpu((float*)d_dist_buf_2, voc, batch, 0, 10, 0, batch);
+
+    std::cout << "d_dist_buf_output\n";
+    print_matrix_gpu((float*)d_dist_buf_output, voc, batch, 0, 10, 0, batch);
 
 
   }

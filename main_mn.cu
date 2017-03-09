@@ -5,9 +5,6 @@
 #include <iostream>
 //#include <glog/logging.h>
 #include <cuda_runtime.h>
-#include "cusparse.h"
-#include <thrust/copy.h>
-#include <thrust/execution_policy.h>
 
 const char* db_input = "./data/d_Db_input.txt.bin";
 const char* pad_input = "./data/d_ht_pad_input.txt.bin";
@@ -23,14 +20,6 @@ const int block_size = 32;
 #define LOG(INFO) std::cout
 #define CHECK assert
 
-struct non_negative
-{
-  __host__ __device__
-  bool operator()(const int x)
-  {
-    return x >= 0;
-  }
-};
 
 /**
  * Matrix multiplication (CUDA Kernel) on the device: C = A^T * B
@@ -38,10 +27,10 @@ struct non_negative
  * B = k x n
  * All matrice are column major
  */
-template <int BLOCK_SIZE>
+template <int BLOCK_VOCAB>
 __global__ void
 matrixMulCUDA(float *C, float *C_input, float *A, float *B,
-	      const int M, const int N, const int K) {
+    const int M, const int N, const int K) {
   int cx = threadIdx.x + blockIdx.x*blockDim.x;
   int cy = threadIdx.y + blockIdx.y*blockDim.y;
   // Csub is used to store the element of the block sub-matrix
@@ -55,8 +44,8 @@ matrixMulCUDA(float *C, float *C_input, float *A, float *B,
   
   // Loop over all the sub-matrices of A and B
   // required to compute the block sub-matrix
-  __shared__ float As[BLOCK_SIZE][BLOCK_SIZE];
-  __shared__ float Bs[BLOCK_SIZE][BLOCK_SIZE];
+  __shared__ float As[BLOCK_VOCAB][BLOCK_VOCAB];
+  __shared__ float Bs[BLOCK_VOCAB][BLOCK_SIZE];
 
   for (int ak = threadIdx.y, bk = threadIdx.x; ;
        ak += BLOCK_SIZE, bk += BLOCK_SIZE) {
@@ -82,19 +71,17 @@ matrixMulCUDA(float *C, float *C_input, float *A, float *B,
     // each thread computes one element
     // of the block sub-matrix
     
-    /*
-      if (cx < M && cy < N && Cinput > threshold) {
-      #pragma unroll
+    if (cx < M && cy < N && Cinput > threshold) {
+#pragma unroll
       for (int k = 0; k < BLOCK_SIZE; ++k) {
-      Csub += As[k][threadIdx.x] * Bs[threadIdx.y][k];
+	Csub += As[k][threadIdx.x] * Bs[threadIdx.y][k];
       } 
-      }
-    */
+    }
     
     /*// Synchronize to make sure that the preceding*/
     /*// computation is done before loading two new*/
     /*// sub-matrices of A and B in the next iteration*/
-    //__syncthreads();
+    __syncthreads();
     
     if (ak / BLOCK_SIZE == K/BLOCK_SIZE){
       break;
@@ -104,7 +91,7 @@ matrixMulCUDA(float *C, float *C_input, float *A, float *B,
   
   // Write the block sub-matrix to device memory;
   // each thread writes one element
-
+  
   if (cx < M && cy < N) {
     if (Cinput>threshold){
       C[cy*M+cx] = Csub;
@@ -120,7 +107,6 @@ matrixMulCUDA(float *C, float *C_input, float *A, float *B,
 // <<<1, 1024>>>
 __global__ 
 void special_matrix_sum(float *C, float *A, float *B, int count) {
-#pragma unroll
   for (int i = threadIdx.x; i< count; i += blockDim.x) {
     if (A[i] == -1000){
       C[i] = 0;
@@ -129,75 +115,35 @@ void special_matrix_sum(float *C, float *A, float *B, int count) {
     }
   }
 }
+
+
   
 
-// dense matrix 2 array
-// matrix [vocab, batch]
-// <<<vocab/256,256>>>
-__global__
-void dense2array(float *matrix, int vocab_size, int batch_size, float *array, int* index_array, int topn, int threshold){
-  int vocab_index = threadIdx.x + blockIdx.x * blockDim.x;
-  if (vocab_index < vocab_size){
-    if (vocab_index < topn){
-      array[vocab_index] = 1.f;
-      index_array[vocab_index] = vocab_index;
-    } else {
-      float dest_val = 0;
-      for (int batch_index = 0 ; batch_index < batch_size; batch_index ++){
-	float val = matrix[batch_index * vocab_size + vocab_index];
-	if (val >= threshold){
-	  dest_val = 1;
-	  break;
-	}
-      }
-      array[vocab_index] = dest_val;
-      if (dest_val == 0){
-	index_array[vocab_index] = -1;
-      } else {
-	index_array[vocab_index] = vocab_index;
-      }
-  
-    }
-  }
-}
-
-// rowIdx: [nnz]
-// <<<(nnz+32-1)/32, (32,32)>>>
-__global__
-void fill_new_db(float *d_new_db, float* d_db, int *rowIdx, int embed, int nnz){
-  int row_index = threadIdx.x + blockIdx.x * blockDim.x;
-  if (row_index < nnz){
-    int vocab_index = rowIdx[row_index];
-    for (int i = threadIdx.y ; i < embed ; i+=blockDim.y){
-      d_new_db[row_index*embed + i] = d_db[vocab_index*embed + i];
-    }
-  }
-}
 
 
 
 template<typename dType>
 void print_matrix_gpu(dType *d_matrix,int rows,int cols, int row_start, int row_end, int col_start, int col_end) {
-  dType * h_matrix = (dType *)malloc(rows*cols*sizeof(dType));
-  cudaMemcpy(h_matrix, d_matrix, rows*cols*sizeof(dType), cudaMemcpyDeviceToHost);
-  for(int i=row_start; i<row_end; i++) {
-    for(int j=col_start; j<col_end; j++) {
-      std::cout << h_matrix[i + j*rows] << " ";
+    dType * h_matrix = (dType *)malloc(rows*cols*sizeof(dType));
+    cudaMemcpy(h_matrix, d_matrix, rows*cols*sizeof(dType), cudaMemcpyDeviceToHost);
+    for(int i=row_start; i<row_end; i++) {
+        for(int j=col_start; j<col_end; j++) {
+	  std::cout << h_matrix[i + j*rows] << " ";
+        }
+	std::cout << "\n";
     }
     std::cout << "\n";
-  }
-  std::cout << "\n";
-  free(h_matrix);
+    free(h_matrix);
 }
+
 
 
 int main() {
   FILE *fp = NULL;
-  void *db_buf, *pad_buf, *dist_buf, *d_new_db_buf;
-  void *d_db_buf, *d_pad_buf, *d_dist_buf_input,*d_dist_buf_res,*d_dist_buf_output, *d_dist_buf_1, *d_dist_buf_2, *d_array_buf, *d_index_buf;
-
-  { //read Db
-    CHECK(fp = fopen(db_input, "rb"));
+  void *db_buf, *pad_buf, *dist_buf;
+  void *d_db_buf, *d_pad_buf, *d_dist_buf_input,*d_dist_buf_res,*d_dist_buf_output, *d_dist_buf_1, *d_dist_buf_2;
+  {
+CHECK(fp = fopen(db_input, "rb"));
     int db_input_meta[2];
     CHECK(fread(db_input_meta, sizeof(int), 2, fp) == 2);
     CHECK(db_input_meta[0] == embed); //<< db_input_meta[0];
@@ -210,12 +156,12 @@ int main() {
                               cudaMemcpyHostToDevice));
   }
 
-  { // read ht_pad
-    CHECK(fp = fopen(pad_input, "rb"));
+  {
+CHECK(fp = fopen(pad_input, "rb"));
     int pad_input_meta[2];
     CHECK(fread(pad_input_meta, sizeof(int), 2, fp) == 2);
-    CHECK(pad_input_meta[0] == embed) ;//<< pad_input_meta[0];
-    CHECK(pad_input_meta[1] == batch);// << pad_input_meta[1];
+CHECK(pad_input_meta[0] == embed) ;//<< pad_input_meta[0];
+CHECK(pad_input_meta[1] == batch);// << pad_input_meta[1];
     int count = embed*batch;
     pad_buf = malloc(count*sizeof(float));
     CHECK(fread(pad_buf, sizeof(float), count, fp) == count);
@@ -224,12 +170,12 @@ int main() {
                               cudaMemcpyHostToDevice));
   }
 
-  { // read dist_input
-    CHECK(fp = fopen(dist_input, "rb"));
+  {
+CHECK(fp = fopen(dist_input, "rb"));
     int dist_input_meta[2];
     CHECK(fread(dist_input_meta, sizeof(int), 2, fp) == 2);
-    CHECK(dist_input_meta[0] == voc);// << dist_input_meta[0];
-    CHECK(dist_input_meta[1] == batch);// << dist_input_meta[1];
+CHECK(dist_input_meta[0] == voc);// << dist_input_meta[0];
+CHECK(dist_input_meta[1] == batch);// << dist_input_meta[1];
     int count = voc*batch;
     dist_buf = malloc(count*sizeof(float));
     CHECK(fread(dist_buf, sizeof(float), count, fp) == count);
@@ -237,9 +183,6 @@ int main() {
     checkCudaError(cudaMalloc(&d_dist_buf_1, count*sizeof(float)));
     checkCudaError(cudaMalloc(&d_dist_buf_2, count*sizeof(float)));
     checkCudaError(cudaMalloc(&d_dist_buf_res, count*sizeof(float)));
-    checkCudaError(cudaMalloc(&d_array_buf, voc*sizeof(float)));
-    checkCudaError(cudaMalloc(&d_index_buf, voc*sizeof(int)));
-    
     checkCudaError(cudaMemcpy(d_dist_buf_input, dist_buf, count*sizeof(float),
                               cudaMemcpyHostToDevice));
     checkCudaError(cudaMemcpy(d_dist_buf_1, dist_buf, count*sizeof(float),
@@ -249,12 +192,12 @@ int main() {
 
   }
 
-  { // read dist_output
-    CHECK(fp = fopen(dist_output, "rb"));
+  {
+CHECK(fp = fopen(dist_output, "rb"));
     int dist_input_meta[2];
     CHECK(fread(dist_input_meta, sizeof(int), 2, fp) == 2);
-    CHECK(dist_input_meta[0] == voc);// << dist_input_meta[0];
-    CHECK(dist_input_meta[1] == batch);// << dist_input_meta[1];
+CHECK(dist_input_meta[0] == voc);// << dist_input_meta[0];
+CHECK(dist_input_meta[1] == batch);// << dist_input_meta[1];
     int count = voc*batch;
     dist_buf = malloc(count*sizeof(float));
     CHECK(fread(dist_buf, sizeof(float), count, fp) == count);
@@ -263,117 +206,35 @@ int main() {
                               cudaMemcpyHostToDevice));
   }
 
-  { //dense2array
+
+  
+  {
     cudaEvent_t start, stop;
     checkCudaError(cudaEventCreate(&start));
     checkCudaError(cudaEventCreate(&stop));
-    int topn = 3;
-    int threshold = 2;
-    int thread_size = 256;
-    dim3 threads(thread_size);
-    dim3 grid((voc+threads.x-1)/threads.x);
-    float msecTotal = 0.0f;
+    dim3 threads(block_size, block_size);
+    dim3 grid((voc+threads.x-1)/threads.x,
+              (batch+threads.y-1)/threads.y);
     int Test = 100;
-    
-
-    int nnz, *cscRowIndA;
-    float fnnz;
-    
-    checkCudaError(cudaMalloc(&cscRowIndA, voc*sizeof(int)));
-    checkCudaError(cudaMalloc(&d_new_db_buf, voc*embed*sizeof(float)));
-   
-    cublasHandle_t cublasHandle;
-    checkCublasError(cublasCreate(&cublasHandle));
-    float alpha = 1.f, beta = 0.f;
-
-
     checkCudaError(cudaEventRecord(start, NULL));
     for (int i = 0; i < Test; i++) {
-      dense2array<<<grid, threads>>>((float*)d_dist_buf_input, voc, batch, (float *)d_array_buf, (int *)d_index_buf, topn,threshold); //0.02ms
-      cublasSasum(cublasHandle, voc, (float*)d_array_buf, 1, &fnnz); // 0.01ms
-      thrust::copy_if(thrust::cuda::par, (int*)d_index_buf, (int*)(d_index_buf) + voc , cscRowIndA, non_negative()); //0.09ms
-      nnz = std::floor(fnnz);
-
-      fill_new_db<<<dim3((nnz+2-1)/2),dim3(2,512)>>>((float *)d_new_db_buf,(float *)d_db_buf,cscRowIndA,embed, nnz); // 0.84 ms
-
-      /*
-      cublasSgemm(cublasHandle,
-		  CUBLAS_OP_T, CUBLAS_OP_N,
-		  nnz, batch, embed, &alpha,
-		  (float*)d_new_db_buf, embed,
-		  (float*)d_pad_buf, embed,
-		  &beta,
-		  (float*)d_dist_buf_2, nnz); //1.2 ms
-      */
+      matrixMulCUDA<block_size><<<grid, threads>>>(
+          (float*)d_dist_buf_1, (float*)d_dist_buf_input, (float*)d_db_buf, (float*)d_pad_buf,
+          voc, batch, embed);
     }
-
     checkCudaError(cudaEventRecord(stop, NULL));
     checkCudaError(cudaEventSynchronize(stop));
+    float msecTotal = 0.0f;
     checkCudaError(cudaEventElapsedTime(&msecTotal, start, stop));
     msecTotal /= Test;
-    LOG(INFO)  << "dense2array Time= " << msecTotal << " msec, ";
+    double flopsPerMatrixMul = 2.0 * voc * batch * embed;
+    double gigaFlops = (flopsPerMatrixMul * 1.0e-9f) / (msecTotal / 1000.0f);
+    LOG(INFO) << "Performance= " << gigaFlops << " GFlop/s, "
+              << "Time= " << msecTotal << " msec, ";
     checkCudaError(cudaGetLastError());
-
-    int offset = 0;
-
-    std::cout << "d_dist_buf_input\n";
-    print_matrix_gpu((float*)d_dist_buf_input, voc, batch, offset, offset+10, 0, batch);
-
-    std::cout << "d_array_buf\n";
-    print_matrix_gpu((float*)d_array_buf, voc, 1, offset, offset+10, 0, 1);
-
-    std::cout << "d_index_buf\n";
-    print_matrix_gpu((int*)d_index_buf, voc, 1, offset, offset+10, 0, 1);
-
-    std::cout << "nnz\n";
-    std::cout<<nnz<<"\n";
-
-    std::cout << "cscRowIndA\n";
-    print_matrix_gpu(cscRowIndA, voc, 1, offset+0, offset+10, 0, 1);
-
-    std::cout << "d_db_buf\n";
-    print_matrix_gpu((float*)d_db_buf, embed, voc, 0,10,offset+0, offset+10 );
-
-    std::cout << "d_new_db_buf\n";
-    print_matrix_gpu((float *)d_new_db_buf, embed, voc, 0,10,offset+0, offset+10 );
-
-
-
   }
 
-  
-  
-
-  
-  /*
-    { // self kernel 
-    cudaEvent_t start, stop;
-    checkCudaError(cudaEventCreate(&start));
-    checkCudaError(cudaEventCreate(&stop));
-    dim3 threads(block_size, block_size);
-    dim3 grid((voc+threads.x-1)/threads.x,
-    (batch+threads.y-1)/threads.y);
-    int Test = 100;
-    checkCudaError(cudaEventRecord(start, NULL));
-    for (int i = 0; i < Test; i++) {
-    matrixMulCUDA<block_size><<<grid, threads>>>(
-    (float*)d_dist_buf_1, (float*)d_dist_buf_input, (float*)d_db_buf, (float*)d_pad_buf,
-    voc, batch, embed);
-    }
-    checkCudaError(cudaEventRecord(stop, NULL));
-    checkCudaError(cudaEventSynchronize(stop));
-    float msecTotal = 0.0f;
-    checkCudaError(cudaEventElapsedTime(&msecTotal, start, stop));
-    msecTotal /= Test;
-    double flopsPerMatrixMul = 2.0 * voc * batch * embed;
-    double gigaFlops = (flopsPerMatrixMul * 1.0e-9f) / (msecTotal / 1000.0f);
-    LOG(INFO) << "Performance= " << gigaFlops << " GFlop/s, "
-    << "Time= " << msecTotal << " msec, ";
-    checkCudaError(cudaGetLastError());
-    }
-  */
-
-    { //cublas
+  {
     cublasHandle_t cublasHandle;
     checkCublasError(cublasCreate(&cublasHandle));
     float alpha = 1.f, beta = 0.f;
@@ -382,17 +243,17 @@ int main() {
     checkCudaError(cudaEventCreate(&stop));
     dim3 threads(block_size, block_size);
     dim3 grid((voc+threads.x-1)/threads.x,
-    (batch+threads.y-1)/threads.y);
+              (batch+threads.y-1)/threads.y);
     int Test = 100;
     checkCudaError(cudaEventRecord(start, NULL));
     for (int i = 0; i < Test; i++) {
-    cublasSgemm(cublasHandle,
-    CUBLAS_OP_T, CUBLAS_OP_N,
-    voc, batch, embed, &alpha,
-    (float*)d_db_buf, embed,
-    (float*)d_pad_buf, embed,
-    &beta,
-    (float*)d_dist_buf_2, voc);
+      cublasSgemm(cublasHandle,
+                  CUBLAS_OP_T, CUBLAS_OP_N,
+                  voc, batch, embed, &alpha,
+                  (float*)d_db_buf, embed,
+                  (float*)d_pad_buf, embed,
+                  &beta,
+                  (float*)d_dist_buf_2, voc);
     }
     checkCudaError(cudaEventRecord(stop, NULL));
     checkCudaError(cudaEventSynchronize(stop));
@@ -402,17 +263,18 @@ int main() {
     double flopsPerMatrixMul = 2.0 * voc * batch * embed;
     double gigaFlops = (flopsPerMatrixMul * 1.0e-9f) / (msecTotal / 1000.0f);
     LOG(INFO) << "Performance= " << gigaFlops << " GFlop/s, "
-    << "Time= " << msecTotal << " msec, ";
+              << "Time= " << msecTotal << " msec, ";
     checkCudaError(cudaGetLastError());
-    }
+  }
 
-    /*
-    { //check d_dist_buf_1 == d_dist_buf_2    
+  {
+    //check d_dist_buf_1 == d_dist_buf_2
     cublasHandle_t cublasHandle;
     checkCublasError(cublasCreate(&cublasHandle));
-    float alpha = 1.f, beta = -1.f, result = 1.0f;
+float alpha = 1.f, beta = -1.f, result = 1.0f;
 
-    special_matrix_sum<<<1,1024>>>((float*)d_dist_buf_res,(float*) d_dist_buf_1,(float*) d_dist_buf_2,voc*batch);
+
+ special_matrix_sum<<<1,1024>>>((float*)d_dist_buf_res,(float*) d_dist_buf_1,(float*) d_dist_buf_2,voc*batch);
 
     cublasSasum(cublasHandle, 1, (float*)d_dist_buf_1, 1, &result);
     checkCudaError(cudaGetLastError());
@@ -443,8 +305,8 @@ int main() {
     //print_matrix_gpu((float*)d_dist_buf_output, voc, batch, 0, 10, 0, batch);
 
 
-    }
-  */
+  }
+
 
   return 0;
 }

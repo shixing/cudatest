@@ -162,13 +162,13 @@ void dense2array(float *matrix, int vocab_size, int batch_size, float *array, in
 }
 
 // rowIdx: [nnz]
-// <<<(nnz+32-1)/32, (32,32)>>>
+// <<<(nnz+2-1)/2, (512,2)>>>
 __global__
 void fill_new_db(float *d_new_db, float* d_db, int *rowIdx, int embed, int nnz){
-  int row_index = threadIdx.x + blockIdx.x * blockDim.x;
+  int row_index = threadIdx.y + blockIdx.x * blockDim.y;
   if (row_index < nnz){
     int vocab_index = rowIdx[row_index];
-    for (int i = threadIdx.y ; i < embed ; i+=blockDim.y){
+    for (int i = threadIdx.x ; i < embed ; i+=blockDim.x){
       d_new_db[row_index*embed + i] = d_db[vocab_index*embed + i];
     }
   }
@@ -268,7 +268,7 @@ int main() {
     checkCudaError(cudaEventCreate(&start));
     checkCudaError(cudaEventCreate(&stop));
     int topn = 3;
-    int threshold = 2;
+    int threshold = 3;
     int thread_size = 256;
     dim3 threads(thread_size);
     dim3 grid((voc+threads.x-1)/threads.x);
@@ -286,7 +286,8 @@ int main() {
     checkCublasError(cublasCreate(&cublasHandle));
     float alpha = 1.f, beta = 0.f;
 
-
+    int thread_x = 256; 
+    int thread_y = 1024/ thread_x;
     checkCudaError(cudaEventRecord(start, NULL));
     for (int i = 0; i < Test; i++) {
       dense2array<<<grid, threads>>>((float*)d_dist_buf_input, voc, batch, (float *)d_array_buf, (int *)d_index_buf, topn,threshold); //0.02ms
@@ -294,7 +295,7 @@ int main() {
       thrust::copy_if(thrust::cuda::par, (int*)d_index_buf, (int*)(d_index_buf) + voc , cscRowIndA, non_negative()); //0.09ms
       nnz = std::floor(fnnz);
 
-      fill_new_db<<<dim3((nnz+2-1)/2),dim3(2,512)>>>((float *)d_new_db_buf,(float *)d_db_buf,cscRowIndA,embed, nnz); // 0.84 ms
+      fill_new_db<<<dim3((nnz+thread_y-1)/thread_y),dim3(thread_x,thread_y)>>>((float *)d_new_db_buf,(float *)d_db_buf,cscRowIndA,embed, nnz); // 0.84 ms
 
       /*
       cublasSgemm(cublasHandle,

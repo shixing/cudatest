@@ -12,14 +12,14 @@
 const int batch = 12;
 const int voc = 50000;
 const int embed = 1001;
- int W = 500;
+ int W = 1000;
 
 
 #define LOG(INFO) std::cout
 #define CHECK assert
 #define IDX2C(i,j,ld) (((j)*(ld))+(i))
 
-int * d_starts, * d_lengths;
+unsigned int * d_starts, * d_lengths;
 
 // input
 //50000 12
@@ -42,7 +42,7 @@ dType* read_matrix(const char* fn){
 }
 
 __device__
-int hash_func_1_gpu(int a){
+unsigned int hash_func_1_gpu(unsigned int a){
     a = (a+0x7ed55d16) + (a<<12);
     a = (a^0xc761c23c) ^ (a>>19);
     a = (a+0x165667b1) + (a<<5);
@@ -53,8 +53,8 @@ int hash_func_1_gpu(int a){
 }
 
 __device__
-int hash_func_2_gpu(int key){
-    int c2=0x27d4eb2d; // a prime or an odd constant
+unsigned int hash_func_2_gpu(unsigned int key){
+    unsigned int c2=0x27d4eb2d; // a prime or an odd constant
     key = (key ^ 61) ^ (key >> 16);
     key = key + (key << 3);
     key = key ^ (key >> 4);
@@ -80,9 +80,9 @@ void print_matrix_gpu(dType *d_matrix,int rows,int cols, int row_start, int row_
 }
 
 // <<<1,32>>>
-__global__ void inc_range(float *d_outputdist, int * d_bands_index, int start, int length, int w_index, int batch_index, int vocab_size){
+__global__ void inc_range(float *d_outputdist, unsigned int * d_bands_index, int start, int length, int w_index, int batch_index, int vocab_size){
   for (int i = threadIdx.x; i < length; i += blockDim.x){
-      int word_index = d_bands_index[IDX2C(start + i, w_index, vocab_size)];
+      unsigned int word_index = d_bands_index[IDX2C(start + i, w_index, vocab_size)];
       atomicAdd(&d_outputdist[IDX2C(word_index, batch_index, vocab_size)], 1.0);
   }
 }
@@ -94,22 +94,22 @@ __global__ void inc_range(float *d_outputdist, int * d_bands_index, int start, i
 // <<<64, 12>>>
 template<typename dType>
 __global__
-void cuckoo_lookup_T(int *d_codes, dType *d_outputdist,int batch_size, int vocab_size, int W,
-		     int *d_key_1, int *d_value_1, int * d_length_1,
-		     int *d_key_2, int *d_value_2, int * d_length_2,
-		     int *d_bands_index){
+void cuckoo_lookup_T(unsigned int *d_codes, dType *d_outputdist,int batch_size, int vocab_size, int W,
+		     unsigned int *d_key_1, unsigned int *d_value_1, unsigned int * d_length_1,
+		     unsigned int *d_key_2, unsigned int *d_value_2, unsigned int * d_length_2,
+		     unsigned int *d_bands_index){
   int batch_index = blockIdx.x;
   for (int w_index = threadIdx.x; w_index < W; w_index += blockDim.x){
-    int code = d_codes[w_index + batch_index * W];
+    unsigned int code = d_codes[w_index + batch_index * W];
     //cuckoo lookup;
-    int key1 =( hash_func_1_gpu(code) % vocab_size +vocab_size) %vocab_size + w_index * vocab_size;
+    unsigned int key1 = hash_func_1_gpu(code) % vocab_size + w_index * vocab_size;
     int start = -1;
     int length = 0;
     if (d_key_1[key1] == code){
       start = d_value_1[key1];
       length = d_length_1[key1];
     } else {
-      int key2 = (hash_func_2_gpu(code) % vocab_size +vocab_size ) % vocab_size + w_index * vocab_size;
+      unsigned int key2 = hash_func_2_gpu(code) % vocab_size + w_index * vocab_size;
       if (d_key_2[key2] == code){
 	start = d_value_2[key2];
 	length = d_length_2[key2];
@@ -125,7 +125,7 @@ void cuckoo_lookup_T(int *d_codes, dType *d_outputdist,int batch_size, int vocab
       inc_range<<<1,256,0,s>>>(d_outputdist,d_bands_index,start,length,w_index,batch_index,vocab_size);
     } else {
       for (int i = 0 ; i< length; i ++ ){
-	int word_index = d_bands_index[IDX2C(start + i, w_index, vocab_size)];
+	unsigned int word_index = d_bands_index[IDX2C(start + i, w_index, vocab_size)];
 	atomicAdd(&d_outputdist[IDX2C(word_index, batch_index, vocab_size)], 1.0);
       }
       
@@ -137,10 +137,10 @@ void cuckoo_lookup_T(int *d_codes, dType *d_outputdist,int batch_size, int vocab
 
 template<typename dType>
 __global__
-void cuckoo_lookup_T_3(int *d_codes, dType *d_outputdist,int batch_size, int vocab_size, int W,
-		     int *d_key_1, int *d_value_1, int * d_length_1,
-		     int *d_key_2, int *d_value_2, int * d_length_2,
-		       int *d_bands_index){
+void cuckoo_lookup_T_3(unsigned int *d_codes, dType *d_outputdist,int batch_size, int vocab_size, int W,
+		     unsigned int *d_key_1, unsigned int *d_value_1, unsigned int * d_length_1,
+		     unsigned int *d_key_2, unsigned int *d_value_2, unsigned int * d_length_2,
+		       unsigned int *d_bands_index){
   int batch_index = blockIdx.x;
   const int maxThreads = 1024;
   __shared__ int s_w_index[maxThreads];
@@ -148,27 +148,25 @@ void cuckoo_lookup_T_3(int *d_codes, dType *d_outputdist,int batch_size, int voc
   __shared__ int s_length[maxThreads];
 
   for (int w_index = threadIdx.x; w_index < W; w_index += blockDim.x){
-    int code = d_codes[w_index + batch_index * W];
+    unsigned int code = d_codes[w_index + batch_index * W];
     //cuckoo lookup;
-    int key1 = ( hash_func_1_gpu(code) % vocab_size +vocab_size) %vocab_size + w_index * vocab_size;
+    unsigned int key1 = hash_func_1_gpu(code) % vocab_size + w_index * vocab_size;
     int start = -1;
     int length = 0;
     if (d_key_1[key1] == code){
       start = d_value_1[key1];
       length = d_length_1[key1];
     } else {
-      int key2 = (hash_func_2_gpu(code) % vocab_size +vocab_size ) % vocab_size + w_index * vocab_size;
+      unsigned int key2 = hash_func_2_gpu(code) % vocab_size + w_index * vocab_size;
       if (d_key_2[key2] == code){
 	start = d_value_2[key2];
 	length = d_length_2[key2];
       }
     }
 
-    printf("%d %d %d\n",threadIdx.x,blockIdx.x,length);
-
-    s_w_index[threadIdx.x] = w_index;
-    s_start[threadIdx.x] = start;
-    s_length[threadIdx.x] = length; 
+      s_w_index[threadIdx.x] = w_index;
+      s_start[threadIdx.x] = start;
+      s_length[threadIdx.x] = length; 
     
     int i_start = (threadIdx.x / 32) * 32; 
     int nalive_thread_in_warp = (blockDim.x - i_start > 32) ? 32 : blockDim.x - i_start;
@@ -176,9 +174,9 @@ void cuckoo_lookup_T_3(int *d_codes, dType *d_outputdist,int batch_size, int voc
       int _length = s_length[i];
       int _w_index = s_w_index[i];
       int _start = s_start[i];
-      
+
       for (int j = threadIdx.x % 32; j < _length; j += nalive_thread_in_warp){
-	int word_index = d_bands_index[IDX2C(_start + j, _w_index, vocab_size)];
+	unsigned int word_index = d_bands_index[IDX2C(_start + j, _w_index, vocab_size)];
 	atomicAdd(&d_outputdist[IDX2C(word_index, batch_index, vocab_size)], 1.0);
       } 
     }
@@ -189,10 +187,10 @@ void cuckoo_lookup_T_3(int *d_codes, dType *d_outputdist,int batch_size, int voc
 
 template<typename dType>
 __global__
-void cuckoo_lookup_T_4(int *d_codes, dType *d_outputdist,int batch_size, int vocab_size, int W,
-		     int *d_key_1, int *d_value_1, int * d_length_1,
-		     int *d_key_2, int *d_value_2, int * d_length_2,
-		       int *d_bands_index){
+void cuckoo_lookup_T_4(unsigned int *d_codes, dType *d_outputdist,int batch_size, int vocab_size, int W,
+		     unsigned int *d_key_1, unsigned int *d_value_1, unsigned int * d_length_1,
+		     unsigned int *d_key_2, unsigned int *d_value_2, unsigned int * d_length_2,
+		       unsigned int *d_bands_index){
   int batch_index = blockIdx.x;
   const int maxThreads = 1024;
   __shared__ int s_w_index[maxThreads];
@@ -200,16 +198,16 @@ void cuckoo_lookup_T_4(int *d_codes, dType *d_outputdist,int batch_size, int voc
   __shared__ int s_length[maxThreads];
 
   for (int w_index = threadIdx.x; w_index < W; w_index += blockDim.x){
-    int code = d_codes[w_index + batch_index * W];
+    unsigned int code = d_codes[w_index + batch_index * W];
     //cuckoo lookup;
-    int key1 = ( hash_func_1_gpu(code) % vocab_size +vocab_size) %vocab_size + w_index * vocab_size;
+    unsigned int key1 = hash_func_1_gpu(code) % vocab_size + w_index * vocab_size;
     int start = -1;
     int length = 0;
     if (d_key_1[key1] == code){
       start = d_value_1[key1];
       length = d_length_1[key1];
     } else {
-      int key2 = (hash_func_2_gpu(code) % vocab_size +vocab_size ) % vocab_size + w_index * vocab_size;
+      unsigned int key2 = hash_func_2_gpu(code) % vocab_size + w_index * vocab_size;
       if (d_key_2[key2] == code){
 	start = d_value_2[key2];
 	length = d_length_2[key2];
@@ -233,7 +231,7 @@ void cuckoo_lookup_T_4(int *d_codes, dType *d_outputdist,int batch_size, int voc
       if (_length > 0){
 	int _w_index = s_w_index[ii];
 	int _start = atomicAdd(s_start+ii, 1);
-	int word_index = d_bands_index[IDX2C(_start, _w_index, vocab_size)];
+	unsigned int word_index = d_bands_index[IDX2C(_start, _w_index, vocab_size)];
 	atomicAdd(&d_outputdist[IDX2C(word_index, batch_index, vocab_size)], 1.0);
       } else {
 	ii += nalive_thread_in_warp;
@@ -249,10 +247,10 @@ void cuckoo_lookup_T_4(int *d_codes, dType *d_outputdist,int batch_size, int voc
 //<<<(batch, (vocab + 10k-1) / 10k), std::min(W,1024)>>>
 template<typename dType>
 __global__
-void cuckoo_lookup_T_2(int *d_codes, dType *d_outputdist,int batch_size, int vocab_size, int W,
-		     int *d_key_1, int *d_value_1, int * d_length_1,
-		     int *d_key_2, int *d_value_2, int * d_length_2,
-		       int *d_bands_index ){
+void cuckoo_lookup_T_2(unsigned int *d_codes, dType *d_outputdist,int batch_size, int vocab_size, int W,
+		     unsigned int *d_key_1, unsigned int *d_value_1, unsigned int * d_length_1,
+		     unsigned int *d_key_2, unsigned int *d_value_2, unsigned int * d_length_2,
+		       unsigned int *d_bands_index ){
 
   // init the shared memory to zero
   const int N = 10000;
@@ -268,16 +266,16 @@ void cuckoo_lookup_T_2(int *d_codes, dType *d_outputdist,int batch_size, int voc
   int batch_index = blockIdx.x;
   
   for (int w_index = threadIdx.x; w_index < W; w_index += blockDim.x){
-    int code = d_codes[w_index + batch_index * W];
+    unsigned int code = d_codes[w_index + batch_index * W];
     //cuckoo lookup;
-    int key1 = ( hash_func_1_gpu(code) % vocab_size +vocab_size) %vocab_size + w_index * vocab_size;
+    unsigned int key1 = hash_func_1_gpu(code) % vocab_size + w_index * vocab_size;
     int start = -1;
     int length = 0;
     if (d_key_1[key1] == code){
       start = d_value_1[key1];
       length = d_length_1[key1];
     } else {
-      int key2 = (hash_func_2_gpu(code) % vocab_size +vocab_size ) % vocab_size + w_index * vocab_size;
+      unsigned int key2 = hash_func_2_gpu(code) % vocab_size + w_index * vocab_size;
       if (d_key_2[key2] == code){
 	start = d_value_2[key2];
 	length = d_length_2[key2];
@@ -286,7 +284,7 @@ void cuckoo_lookup_T_2(int *d_codes, dType *d_outputdist,int batch_size, int voc
     /*
     if(length < 256){
     for (int i =0; i< length; i ++){
-      int word_index = d_bands_index[IDX2C(start + i, w_index, vocab_size)];
+      unsigned int word_index = d_bands_index[IDX2C(start + i, w_index, vocab_size)];
       if (word_index >= word_index_begin && word_index < word_index_end){
 	atomicAdd(vocab_shared + (word_index % N), 1);	
       }
@@ -318,30 +316,30 @@ void cuckoo_lookup_T_2(int *d_codes, dType *d_outputdist,int batch_size, int voc
 
 int main() {
 
-  int* d_bands_index = read_matrix<int>("./data/d_bands_index_input.txt.bin");
+  unsigned int* d_bands_index = read_matrix<unsigned int>("./data/d_bands_index_input.txt.bin");
   //50000 1000
-  int* d_ht_pad_codes = read_matrix<int>("./data/d_ht_pad_codes_input.txt.bin");
+  unsigned int* d_ht_pad_codes = read_matrix<unsigned int>("./data/d_ht_pad_codes_input.txt.bin");
   //1000 12
-  int* d_key1 = read_matrix<int>("./data/d_key1_input.txt.bin");
+  unsigned int* d_key1 = read_matrix<unsigned int>("./data/d_key1_input.txt.bin");
   //50000 1000
-  int* d_key2 = read_matrix<int>("./data/d_key2_input.txt.bin");
+  unsigned int* d_key2 = read_matrix<unsigned int>("./data/d_key2_input.txt.bin");
   //50000 1000
-  int* d_length1 = read_matrix<int>("./data/d_length1_input.txt.bin");
+  unsigned int* d_length1 = read_matrix<unsigned int>("./data/d_length1_input.txt.bin");
   //50000 1000
-  int* d_length2 = read_matrix<int>("./data/d_length2_input.txt.bin");
+  unsigned int* d_length2 = read_matrix<unsigned int>("./data/d_length2_input.txt.bin");
   //50000 1000
   float* d_dist_input = read_matrix<float>("./data/d_outputdist_lookup_input.txt.bin");
   //50000 12
-  int* d_value1 = read_matrix<int>("./data/d_value1_input.txt.bin");
+  unsigned int* d_value1 = read_matrix<unsigned int>("./data/d_value1_input.txt.bin");
   //50000 1000
-  int* d_value2 = read_matrix<int>("./data/d_value2_input.txt.bin");
+  unsigned int* d_value2 = read_matrix<unsigned int>("./data/d_value2_input.txt.bin");
   //50000 1000
 
   // output
   float* d_dist_output = read_matrix<float>("./data/d_outputdist_input.txt.bin");
 
-  checkCudaError(cudaMalloc(&d_starts, 1024 * batch*sizeof(int)));
-  checkCudaError(cudaMalloc(&d_lengths, 1024 * batch*sizeof(int)));
+  checkCudaError(cudaMalloc(&d_starts, 1024 * batch*sizeof(unsigned int)));
+  checkCudaError(cudaMalloc(&d_lengths, 1024 * batch*sizeof(unsigned int)));
 
 
 
